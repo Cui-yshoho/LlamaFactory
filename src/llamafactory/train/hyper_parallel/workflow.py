@@ -23,9 +23,11 @@ from ...extras.logging import get_logger
 from ...extras.misc import calculate_tps
 from ...extras.packages import is_hyper_parallel_available, is_transformers_version_greater_than
 from ...extras.ploting import plot_loss
-from ...model import load_model, load_tokenizer
+from ...model import load_tokenizer
+from ...model.loader import load_config
 from ..sft.metric import ComputeAccuracy, ComputeSimilarity, eval_logit_processor
-from ..trainer_utils import create_modelcard_and_push, create_ref_model
+from ..trainer_utils import create_modelcard_and_push
+from .loader import load_hyper_parallel_model
 from .trainer import HyperParallelTrainer
 
 
@@ -42,10 +44,19 @@ def _prepare_hp_args(finetuning_args: "FinetuningArguments", model_args: "ModelA
     r"""Load HyperParallel arguments and apply LlamaFactory-side overrides.
 
     When activation optimization is enabled, skip native gradient checkpointing
-    so HP can install its own via ``setup_activation_optimization``.
+    so Hyper's unified model builder can install it before FSDP wrapping.
     """
     if not is_hyper_parallel_available():
         raise ImportError("hyper_parallel is not installed. Please install it with `pip install hyper_parallel`.")
+
+    if finetuning_args.finetuning_type != "full":
+        raise ValueError("HyperParallel currently requires full fine-tuning in LlamaFactory.")
+    if model_args.quantization_bit is not None:
+        raise ValueError("HyperParallel meta initialization does not support quantized LlamaFactory models yet.")
+    if model_args.use_unsloth or model_args.mixture_of_depths is not None:
+        raise ValueError("HyperParallel meta initialization is incompatible with Unsloth and mixture-of-depths.")
+    if finetuning_args.use_asft_loss:
+        raise ValueError("HyperParallel does not yet support the additional ASFT reference model.")
 
     from hyper_parallel.integration.llamafactory import HyperParallelArguments  # pylint: disable=C0415
 
@@ -78,16 +89,26 @@ def run_pt(
     callbacks: Optional[list["TrainerCallback"]] = None,
 ):
     hp_args = _prepare_hp_args(finetuning_args, model_args)
+    model_type = getattr(load_config(model_args), "model_type", None)
+    distributed_setup = hp_args.build_distributed_setup(model_type=model_type)
 
     tokenizer_module = load_tokenizer(model_args)
     tokenizer = tokenizer_module["tokenizer"]
     template = get_template_and_fix_tokenizer(tokenizer, data_args)
     dataset_module = get_dataset(template, model_args, data_args, training_args, stage="pt", **tokenizer_module)
-    model = load_model(tokenizer, model_args, finetuning_args, training_args.do_train)
+    model = load_hyper_parallel_model(
+        tokenizer,
+        model_args,
+        finetuning_args,
+        distributed_setup,
+        hp_args,
+        is_trainable=training_args.do_train,
+    )
     data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
 
     trainer = HyperParallelTrainer(
         hp_args=hp_args,
+        distributed_setup=distributed_setup,
         model=model,
         args=training_args,
         finetuning_args=finetuning_args,
@@ -146,16 +167,21 @@ def run_sft(
     callbacks: Optional[list["TrainerCallback"]] = None,
 ):
     hp_args = _prepare_hp_args(finetuning_args, model_args)
+    model_type = getattr(load_config(model_args), "model_type", None)
+    distributed_setup = hp_args.build_distributed_setup(model_type=model_type)
 
     tokenizer_module = load_tokenizer(model_args)
     tokenizer = tokenizer_module["tokenizer"]
     template = get_template_and_fix_tokenizer(tokenizer, data_args)
     dataset_module = get_dataset(template, model_args, data_args, training_args, stage="sft", **tokenizer_module)
-    model = load_model(tokenizer, model_args, finetuning_args, training_args.do_train)
-
-    ref_model = None
-    if finetuning_args.use_asft_loss:
-        ref_model = create_ref_model(model_args, finetuning_args)
+    model = load_hyper_parallel_model(
+        tokenizer,
+        model_args,
+        finetuning_args,
+        distributed_setup,
+        hp_args,
+        is_trainable=training_args.do_train,
+    )
 
     data_collator = SFTDataCollatorWith4DAttentionMask(
         template=template,
@@ -192,13 +218,13 @@ def run_sft(
 
     trainer = HyperParallelTrainer(
         hp_args=hp_args,
+        distributed_setup=distributed_setup,
         model=model,
         args=training_args,
         finetuning_args=finetuning_args,
         data_collator=data_collator,
         callbacks=callbacks,
         gen_kwargs=gen_kwargs,
-        ref_model=ref_model,
         **dataset_module,
         **tokenizer_module,
         **metric_module,
