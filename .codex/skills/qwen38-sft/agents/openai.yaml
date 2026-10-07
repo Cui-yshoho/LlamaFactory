@@ -1,0 +1,7 @@
+interface:
+  display_name: "Qwen3.8 一站式微调"
+  short_description: "自动完成环境、数据、训练、评测与本地部署"
+  default_prompt: "使用 $qwen38-sft 接管 Qwen3.8-27B 的环境安装、数据准备、训练、评测和本地 API 部署。"
+
+policy:
+  allow_implicit_invocation: true
