@@ -50,6 +50,11 @@ if is_transformers_version_greater_than("4.57.0"):
 logger = logging.get_logger(__name__)
 
 
+def _get_qwen3_5_language_layers(model: "PreTrainedModel") -> list[torch.nn.Module]:
+    language_model = getattr(model.model, "language_model", model.model)
+    return language_model.layers
+
+
 def patch_qwen3_omni_moe_thinker_text_sparse_moe_block():
     if is_transformers_version_greater_than("4.57.0") and not is_transformers_version_greater_than("4.58.0"):
         from .model_utils.moe import Qwen3OmniMoeThinkerTextSparseMoeBlock
@@ -114,28 +119,25 @@ def patch_qwen3_5_forward_npu(model: "PreTrainedModel") -> None:
 
     from ..third_party.triton.chunk_gated_delta_rule import chunk_gated_delta_rule as npu_chunk_gated_delta_rule
 
-    if model.config.architectures[0] == "Qwen3_5MoeForConditionalGeneration":
-        try:
-            # Qwen3.5-MoE structure: model.model.language_model.layers
-            for layer in model.model.language_model.layers:
-                if hasattr(layer, "linear_attn"):
-                    layer.linear_attn.chunk_gated_delta_rule = npu_chunk_gated_delta_rule
+    supported_architectures = {
+        "Qwen3_5ForCausalLM",
+        "Qwen3_5ForConditionalGeneration",
+        "Qwen3_5MoeForCausalLM",
+        "Qwen3_5MoeForConditionalGeneration",
+    }
+    if model.config.architectures[0] not in supported_architectures:
+        return
 
-            logger.info_rank0(
-                "Replaced chunk_gated_delta_rule with NPU-compatible implementation for Qwen3.5-MoE model."
-            )
-        except Exception as e:
-            logger.warning_rank0(f"Failed to replace chunk_gated_delta_rule for NPU: {e}")
-    elif model.config.architectures[0] == "Qwen3_5ForConditionalGeneration":
-        try:
-            # Qwen3.5 structure: model.model.layers
-            for layer in model.model.layers:
-                if hasattr(layer, "linear_attn"):
-                    layer.linear_attn.chunk_gated_delta_rule = npu_chunk_gated_delta_rule
+    try:
+        patched_modules = 0
+        for layer in _get_qwen3_5_language_layers(model):
+            if hasattr(layer, "linear_attn"):
+                layer.linear_attn.chunk_gated_delta_rule = npu_chunk_gated_delta_rule
+                patched_modules += 1
 
-            logger.info_rank0("Replaced chunk_gated_delta_rule with NPU-compatible implementation for Qwen3.5 model.")
-        except Exception as e:
-            logger.warning_rank0(f"Failed to replace chunk_gated_delta_rule for NPU: {e}")
+        logger.info_rank0(f"Applied NPU GDN kernels to {patched_modules} Qwen3.5 linear attention modules.")
+    except Exception as e:
+        logger.warning_rank0(f"Failed to apply NPU GDN kernels: {e}")
 
 
 def patch_qwen3_5_forward_gpu(model: "PreTrainedModel") -> None:

@@ -18,7 +18,14 @@ from unittest.mock import patch
 
 import torch
 from hyper_parallel.core.optimizer import ChainedOptimizer
+from hyper_parallel.models import get_model_adapter
 
+from llamafactory.extras.constants import (
+    DEFAULT_TEMPLATE,
+    MULTIMODAL_SUPPORTED_MODELS,
+    SUPPORTED_MODELS,
+    DownloadSource,
+)
 from llamafactory.train.hyper_parallel.loader import load_hyper_parallel_model
 from llamafactory.train.hyper_parallel.model_registry import apply_model_parallel_plan
 from llamafactory.train.hyper_parallel.trainer import (
@@ -29,6 +36,18 @@ from llamafactory.train.hyper_parallel.trainer import (
     _shard_inputs_for_cp,
 )
 from llamafactory.train.hyper_parallel.workflow import _prepare_hp_args
+
+
+def test_qwen38_uses_qwen35_hyper_model_adapter():
+    model_name = "Qwen3.8-27B"
+
+    assert SUPPORTED_MODELS[model_name][DownloadSource.DEFAULT] == "Qwen/Qwen3.8-27B"
+    assert DEFAULT_TEMPLATE[model_name] == "qwen3_8"
+    assert model_name in MULTIMODAL_SUPPORTED_MODELS
+
+    adapter = get_model_adapter("qwen3_5")
+    assert adapter is not None
+    assert adapter.architecture == "Qwen3_5ForConditionalGeneration"
 
 
 def test_create_hyper_muon_optimizer_preserves_llamafactory_parameter_split():
